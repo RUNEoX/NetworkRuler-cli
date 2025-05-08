@@ -3,14 +3,19 @@ import psutil
 import subprocess
 import os
 import time
-import pydivert
 import ctypes
 import sys
 from datetime import datetime
-import subprocess
-import pydivert
 
-ctypes.WinDLL(r"A:\Program\NetworkRuler-cli\WinDivert-2.2.2-A\WinDivert64.dll")
+def add_to_path(new_path):
+    current_path = os.environ.get("PATH", "")
+    if new_path not in current_path:
+        os.environ["PATH"] = current_path + os.pathsep + new_path
+        print(f"Added {new_path} to PATH.")
+
+def install_path():
+    new_path = r'C:\your\fixed\path\here'  
+    add_to_path(new_path)
 
 def list_all():
     seen = set()
@@ -43,21 +48,22 @@ def list_services():
             print(line.strip().split(":")[-1].strip())
 
 def kill_process(name_or_pid):
-    # Handle both PID and name as inputs
+    killed_any = False
     for proc in psutil.process_iter(['pid', 'name']):
         if str(proc.info['pid']) == str(name_or_pid) or proc.info['name'].lower() == str(name_or_pid).lower():
             try:
                 proc.kill()
                 print(f"Killed {proc.info['name']} (PID: {proc.info['pid']})")
-                return
+                killed_any = True
             except Exception as e:
                 print(f"Failed: {e}")
-                return
-    try:
-        subprocess.run(f'sc stop "{name_or_pid}"', shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"Stopped service: {name_or_pid}")
-    except subprocess.CalledProcessError:
-        print("No such process or service found.")
+
+    if not killed_any:
+        try:
+            subprocess.run(f'sc stop "{name_or_pid}"', shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"Stopped service: {name_or_pid}")
+        except subprocess.CalledProcessError:
+            print("No such process or service found.")
 
 def get_target_ips(proc_name):
     target_ips = set()
@@ -72,28 +78,29 @@ def get_target_ips(proc_name):
     return target_ips
 
 def throttle_process(proc_name, mbps):
-    max_bps = mbps * 1024 * 1024 // 8
-    print(f"Throttling {proc_name} to {mbps} Mbps")
-    sent = 0
-    start_time = time.time()
-    ip_cache = set()
+    exe_path = None
+    for proc in psutil.process_iter(['pid', 'name', 'exe']):
+        if proc.info['name'].lower() == proc_name.lower():
+            exe_path = proc.info['exe']
+            break
 
-    with pydivert.WinDivert("outbound and tcp") as w:
-        for packet in w:
-            now = time.time()
-            if now - start_time >= 1:
-                start_time = now
-                sent = 0
-                ip_cache = get_target_ips(proc_name)
+    if not exe_path:
+        print(f"Could not find process: {proc_name}")
+        return
 
-            if packet.dst_addr in ip_cache:
-                if sent + len(packet.payload) > max_bps:
-                    continue
-                else:
-                    sent += len(packet.payload)
-                    w.send(packet)
-            else:
-                w.send(packet)
+    rule_name = f"NR_{proc_name}_{mbps}mb"
+    bps = mbps * 1024 * 1024  # Convert Mbps to bits per second
+
+    ps_cmd = (
+        f"New-NetQosPolicy -Name '{rule_name}' -AppPath '{exe_path}' "
+        f"-ThrottleRateActionBitsPerSecond {bps} -PolicyStore ActiveStore"
+    )
+
+    try:
+        subprocess.run(["powershell", "-Command", ps_cmd], check=True)
+        print(f"Throttling {proc_name} to {mbps} Mbps using New-NetQosPolicy")  # Throttle bandwidth dont work for now 
+    except subprocess.CalledProcessError as e:
+        print("Failed to set throttle rule:", e)
 
 def throttle_background_apps(mbps):
     max_bps = mbps * 1024 * 1024 // 8
@@ -115,32 +122,28 @@ def throttle_background_apps(mbps):
     start_time = time.time()
     ip_map = {}
 
-    with pydivert.WinDivert("outbound and tcp") as w:
-        for packet in w:
-            now = time.time()
-            if now - start_time >= 1:
-                start_time = now
-                sent = 0
-                ip_map = {}
-                for name in bg_procs:
-                    for conn in psutil.net_connections(kind='inet'):
-                        try:
-                            if conn.pid:
-                                p = psutil.Process(conn.pid)
-                                if p.name().lower() == name and conn.raddr:
-                                    ip_map.setdefault(name, set()).add(conn.raddr.ip)
-                        except:
-                            continue
+    for packet in psutil.net_connections(kind='inet'):
+        now = time.time()
+        if now - start_time >= 1:
+            start_time = now
+            sent = 0
+            ip_map = {}
+            for name in bg_procs:
+                for conn in psutil.net_connections(kind='inet'):
+                    try:
+                        if conn.pid:
+                            p = psutil.Process(conn.pid)
+                            if p.name().lower() == name and conn.raddr:
+                                ip_map.setdefault(name, set()).add(conn.raddr.ip)
+                    except:
+                        continue
 
-            match = any(packet.dst_addr in ip_map.get(name, set()) for name in bg_procs)
-            if match:
-                if sent + len(packet.payload) > max_bps:
-                    continue
-                else:
-                    sent += len(packet.payload)
-                    w.send(packet)
+        match = any(packet.dst_addr in ip_map.get(name, set()) for name in bg_procs)
+        if match:
+            if sent + len(packet.payload) > max_bps:
+                continue
             else:
-                w.send(packet)
+                sent += len(packet.payload)
 
 def schedule_throttle(proc_name, mbps, start_time, end_time):
     now = datetime.now().time()
@@ -148,19 +151,26 @@ def schedule_throttle(proc_name, mbps, start_time, end_time):
         throttle_process(proc_name, mbps)
 
 def monitor_bandwidth():
-    print("Real-time Bandwidth Monitor:")
-    while True:
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                net = proc.connections(kind='inet')
-                total_sent = total_recv = 0
-                for conn in net:
-                    total_sent += conn.sent_bytes
-                    total_recv += conn.recv_bytes
-                print(f"{proc.info['name']} (PID: {proc.info['pid']}): Sent={total_sent} Recv={total_recv}")
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-        time.sleep(1)
+    print("Real-time Bandwidth Monitor (Press Ctrl+C to quit):")
+    previous_sent = psutil.net_io_counters().bytes_sent
+    previous_recv = psutil.net_io_counters().bytes_recv
+
+    try:
+        while True:
+            time.sleep(1)
+
+            current_sent = psutil.net_io_counters().bytes_sent
+            current_recv = psutil.net_io_counters().bytes_recv
+
+            sent_delta = current_sent - previous_sent
+            recv_delta = current_recv - previous_recv
+
+            print(f"Sent: {sent_delta / (1024 * 1024):.2f} MB/s | Received: {recv_delta / (1024 * 1024):.2f} MB/s")
+
+            previous_sent = current_sent
+            previous_recv = current_recv
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped by user.")
 
 def save_profile(profile_name, settings):
     with open(f"{profile_name}.profile", 'w') as file:
@@ -187,35 +197,45 @@ def log_activity(log_file, activity):
 
 def show_help():
     help_text = """
-Usage: network ruler <command> [options]
+    Usage: network ruler <command> [options]
+    
+    Available Commands:
+    --list                          List all processes and services
+    app --list                      List only applications
+    srv --list                      List only services
+    --kill <name|pid>              Kill a process or stop a service
+    --limit <process.exe> <speed>  Throttle specific process (ex: 5mb)
+    background app --limit <speed> Throttle all background apps (ex: 1mb)
+    monitor --live                 Monitor real-time bandwidth usage
+    save <profile_name> <settings>  Save current settings to profile
+    load <profile_name>            Load settings from a profile
+    stealth                        Run in background with no terminal window
+    log <file> <activity>          Log network activity
 
-Available Commands:
-  --list                          List all processes and services
-  app --list                      List only applications
-  srv --list                      List only services
-  --kill <name|pid>              Kill a process or stop a service
-  --limit <process.exe> <speed>  Throttle specific process (ex: 5mb)
-  background app --limit <speed> Throttle all background apps (ex: 1mb)
-  monitor --live                 Monitor real-time bandwidth usage
-  save <profile_name> <settings>  Save current settings to profile
-  load <profile_name>            Load settings from a profile
-  stealth                        Run in background with no terminal window
-  log <file> <activity>          Log network activity
+    Examples:
+    network ruler --list
+    network ruler app --list
+    network ruler srv --list
+    network ruler --kill explorer.exe
+    network ruler --limit fdm.exe 5mb
+    network ruler background app --limit 1mb
+    network ruler monitor --live
+    network ruler save gaming_profile {"limit": "5mb"}
+    network ruler stealth
 
-Examples:
-  network ruler --list
-  network ruler app --list
-  network ruler srv --list
-  network ruler --kill explorer.exe
-  network ruler --limit fdm.exe 5mb
-  network ruler background app --limit 1mb
-  network ruler monitor --live
-  network ruler save gaming_profile {"limit": "5mb"}
-  network ruler stealth
-"""
+    For alias:
+    (if the alias dont  work )
+    put the network_ruler.bat + network_ruler.ps1 file in the System PATH 
+    it will work from any directory as "nr" command
+    no need for cd "directory" to run the script
+    Example: nr --list
+    """
+    
     print(help_text)
 
 def main():
+    install_path()
+
     if sys.argv[0] == 'nr':
         sys.argv[0] = 'network ruler'
 
@@ -224,7 +244,7 @@ def main():
         return
 
     if len(sys.argv) < 2:
-        print("Missing command, honey. Use --help 💋")
+        print("Missing command, honey. Use --help ")
         return
 
     if sys.argv[1] == '--list':
@@ -237,7 +257,7 @@ def main():
     elif sys.argv[1] == '--limit':
         if len(sys.argv) >= 4:
             mb = int(sys.argv[3].lower().replace('mb', '').replace('m', ''))
-            throttle_process(sys.argv[2], mb)
+            throttle_process(sys.argv[2], mb)  # Throttle bandwidth dont work for now
         else:
             print("Usage: --limit <proc.exe> 5mb")
     elif sys.argv[1] == 'app' and sys.argv[2] == '--list':
@@ -264,18 +284,8 @@ def main():
             print("Usage: load <profile_name>")
     elif sys.argv[1] == 'stealth':
         stealth_mode()
-    elif sys.argv[1] == 'log':
-        if len(sys.argv) >= 4:
-            log_activity(sys.argv[2], sys.argv[3])
-        else:
-            print("Usage: log <file> <activity>")
     else:
-        print("Unknown command. Use --help")
+        print("Unknown command, sweetheart! Use --help for options.")
 
 if __name__ == '__main__':
-    if os.name != 'nt':
-        print("only works on Windows.")
-    elif not ctypes.windll.shell32.IsUserAnAdmin():
-        print("Run as admin")
-    else:
-        main()
+    main()
