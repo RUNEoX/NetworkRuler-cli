@@ -22,7 +22,7 @@
 | `--list` | List all running processes and services |
 | `app --list` | List only running applications |
 | `srv --list` | List only running services |
-| `--kill <name|pid>` | Kill a process or stop a service |
+| ` --kill <name|pid> ` | Kill a process or stop a service |
 | `--limit <process.exe> <speed>` | Throttle a specific process (e.g., `5mb`) *(not functional yet)* |
 | `background app --limit <speed>` | Throttle background apps (e.g., `1mb`) *(not functional yet)* |
 | `monitor --live` | Real-time bandwidth monitor |
