@@ -217,10 +217,12 @@ def show_help():
     network ruler app --list
     network ruler srv --list
     network ruler --kill explorer.exe
-    network ruler --limit fdm.exe 5mb
-    network ruler background app --limit 1mb
+    network ruler --limit fdm.exe 5mb (dont work for now)
+    network ruler background app --limit 1mb (dont work for now)
     network ruler monitor --live
-    network ruler save gaming_profile {"limit": "5mb"}
+    network ruler save gaming_profile {"limit": "5mb"} (the bandwith limit dont work for now so no point of the profile)
+    network ruler load gaming_profile
+    network ruler log activity.log "Network activity logged" (this will log the activity to a file)
     network ruler stealth
 
     For alias:
