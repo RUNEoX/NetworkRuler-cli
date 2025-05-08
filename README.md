@@ -8,11 +8,8 @@
 
 - 🔍 **List all active processes and services**
 - ❌ **Kill processes or stop services by name or PID**
-- 🧠 **Throttle individual applications** *(placeholder feature for now)*
-- 👻 **Throttle background apps** *(currently non-functional placeholder)*
 - 📈 **Live bandwidth monitoring**
 - 💾 **Save/load network profiles** *(works but throttling not yet functional)*
-- 🥷 **Stealth mode execution**
 - 📓 **Activity logging to custom file**
 - 🧩 **Path installation for system-wide aliasing as `nr`**
 
